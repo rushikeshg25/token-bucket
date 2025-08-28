@@ -3,28 +3,27 @@ package tokenbucket
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-type TokenBucket struct {
+type RateLimiter struct {
 	redisClient *redis.Client
-	key         string
 	capacity    int
 	refillRate  int
 }
 
-func NewTokenBucket(redisClient *redis.Client, key string, capacity int, refillRate int) *TokenBucket {
-	return &TokenBucket{
+func NewRateLimiter(redisClient *redis.Client, capacity int, refillRate int) *RateLimiter {
+	return &RateLimiter{
 		redisClient: redisClient,
-		key:         key,
 		capacity:    capacity,
 		refillRate:  refillRate,
 	}
 }
 
-func (tb *TokenBucket) RateLimit(ctx context.Context) (bool, error) {
+func (rl *RateLimiter) Allow(ctx context.Context, key string) (bool, error) {
 	luaScript := `
 	local key = KEYS[1]
 	local capacity = tonumber(ARGV[1])
@@ -52,19 +51,54 @@ func (tb *TokenBucket) RateLimit(ctx context.Context) (bool, error) {
 	end
 
 	redis.call("HMSET", key, "tokens", tokens, "last_refill", last_refill)
+	redis.call("EXPIRE", key, 3600) -- Expire after 1 hour of inactivity
 	return allowed
 	`
+
 	now := time.Now().Unix()
-	res, err := tb.redisClient.Eval(ctx, luaScript, []string{tb.key},
-		tb.capacity, tb.refillRate, now).Result()
+	res, err := rl.redisClient.Eval(ctx, luaScript, []string{key},
+		rl.capacity, rl.refillRate, now).Result()
 	if err != nil {
-		return false, fmt.Errorf("failed to eval token bucket: %w", err)
+		return false, fmt.Errorf("failed to eval rate limiter: %w", err)
 	}
 
 	allowed, ok := res.(int64)
 	if !ok {
-		return false, fmt.Errorf("unexpected result")
+		return false, fmt.Errorf("unexpected result from redis")
 	}
 
 	return allowed == 1, nil
+}
+
+func (rl *RateLimiter) GetStatus(ctx context.Context, key string) (tokens int64, lastRefill int64, err error) {
+	result, err := rl.redisClient.HMGet(ctx, key, "tokens", "last_refill").Result()
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get status: %w", err)
+	}
+
+	if result[0] != nil {
+		tokensStr, ok := result[0].(string)
+		if ok {
+			tokensInt, err := strconv.Atoi(tokensStr)
+			if err == nil {
+				tokens = int64(tokensInt)
+			}
+		}
+	}
+
+	if tokens == 0 && result[0] == nil {
+		tokens = int64(rl.capacity)
+	}
+
+	if result[1] != nil {
+		lastRefillStr, ok := result[1].(string)
+		if ok {
+			lastRefillInt, err := strconv.Atoi(lastRefillStr)
+			if err == nil {
+				lastRefill = int64(lastRefillInt)
+			}
+		}
+	}
+
+	return tokens, lastRefill, nil
 }

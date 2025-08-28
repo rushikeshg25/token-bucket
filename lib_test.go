@@ -17,32 +17,32 @@ func TestTokenBucket(t *testing.T) {
 	ctx := context.Background()
 	redis.Del(ctx, "test-key")
 
-	tb := NewTokenBucket(redis, "test-key", 5, 2)
+	tb := NewRateLimiter(redis, 5, 2)
 
 	// First 5 tokens allowed
 	for i := 0; i < 5; i++ {
-		allowed, err := tb.RateLimit(ctx)
+		allowed, err := tb.Allow(ctx, "test-key")
 		assert.NoError(t, err)
 		assert.True(t, allowed)
 	}
 
 	// Next token denied
-	allowed, err := tb.RateLimit(ctx)
+	allowed, err := tb.Allow(ctx, "test-key")
 	assert.NoError(t, err)
 	assert.False(t, allowed)
 
 	// 2 tokens refilled
 	time.Sleep(time.Second * 1)
 
-	allowed, err = tb.RateLimit(ctx)
+	allowed, err = tb.Allow(ctx, "test-key")
 	assert.NoError(t, err)
 	assert.True(t, allowed) // refill allowed
 
-	allowed, err = tb.RateLimit(ctx)
+	allowed, err = tb.Allow(ctx, "test-key")
 	assert.NoError(t, err)
 	assert.True(t, allowed) // refill allowed
 
-	allowed, err = tb.RateLimit(ctx)
+	allowed, err = tb.Allow(ctx, "test-key")
 	assert.NoError(t, err)
 	assert.False(t, allowed) // no more tokens
 
